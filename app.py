@@ -2,115 +2,103 @@ import streamlit as st
 import pandas as pd
 import geopandas as gpd
 import folium
-from folium.features import GeoJsonTooltip
 from streamlit_folium import st_folium
-import os
+from tensorflow.keras.models import load_model
+import joblib
+import numpy as np
+import matplotlib.pyplot as plt
 
-# === Configuración general de la app ===
-st.set_page_config(page_title="Dashboard de Pobreza en el Perú (2022–2024)", layout="wide")
-
-data_dir = "data"
-geojson_path = os.path.join(data_dir, "peru_departamental.geojson")
-
-# === Archivos Excel (usa los corregidos) ===
-archivos_excel = [
-    os.path.join(data_dir, "Pobreza_2022_CORREGIDO.xlsx"),
-    os.path.join(data_dir, "Pobreza_2023_CORREGIDO.xlsx"),
-    os.path.join(data_dir, "Pobreza_2024_CORREGIDO.xlsx"),
-]
-
-# === Cargar y combinar los Excel ===
-dfs = []
-for archivo in archivos_excel:
-    if os.path.exists(archivo):
-        dfs.append(pd.read_excel(archivo))
-df = pd.concat(dfs, ignore_index=True)
-
-# Normalizar columnas y nombres
-df.columns = df.columns.str.strip().str.lower()
-df["departamento"] = df["departamento"].str.upper().str.strip()
-
-# Cargar GeoJSON
-geo = gpd.read_file(geojson_path)
-geo["NOMBDEP"] = geo["NOMBDEP"].str.upper().str.strip()
-
-# === Barra lateral (filtros) ===
-st.sidebar.image("https://cdn-icons-png.flaticon.com/512/893/893292.png", width=60)
+# ============================
+# CONFIGURACIÓN INICIAL
+# ============================
+st.set_page_config(page_title="Dashboard de Pobreza en el Perú", layout="wide")
 st.sidebar.title("📊 Dashboard de Pobreza en el Perú")
-año = st.sidebar.selectbox("Selecciona un año:", sorted(df["año"].unique()))
-st.sidebar.markdown("---")
 
-# Filtrar por año
-datos_año = df[df["año"] == año]
-
-# === Crear mapa ===
-m = folium.Map(location=[-9.2, -75.0], zoom_start=5, tiles="cartodb dark_matter")
-
-merged = geo.merge(datos_año, left_on="NOMBDEP", right_on="departamento", how="left")
-
-# Capa de color por pobreza total
-folium.Choropleth(
-    geo_data=merged,
-    data=merged,
-    columns=["NOMBDEP", "pobreza_total_%"],
-    key_on="feature.properties.NOMBDEP",
-    fill_color="YlOrRd",
-    nan_fill_color="gray",
-    fill_opacity=0.8,
-    line_opacity=0.3,
-    legend_name=f"Pobreza total (%) - {año}",
-).add_to(m)
-
-# Tooltip con datos
-tooltip = GeoJsonTooltip(
-    fields=["NOMBDEP", "pobreza_total_%", "pobreza_extrema_%", "empleo_informal_%", "sin_internet_%", "umbral_zona_pobreza"],
-    aliases=[
-        "Departamento:",
-        "Pobreza total (%):",
-        "Pobreza extrema (%):",
-        "Empleo informal (%):",
-        "Sin internet (%):",
-        "Umbral de pobreza:",
-    ],
-    localize=True,
-    sticky=True,
-    labels=True,
-    style="background-color: #222; color: #fff; font-family: Arial; font-size: 13px; padding: 8px;",
+modo = st.sidebar.radio(
+    "Selecciona modo de vista:",
+    ["🕰️ Histórico", "🤖 Predicción 2025"]
 )
 
-folium.GeoJson(
-    merged,
-    name="Datos",
-    style_function=lambda x: {"color": "white", "weight": 0.3, "fillOpacity": 0},
-    tooltip=tooltip,
-).add_to(m)
+# ============================
+# CARGA DE DATOS Y MODELOS
+# ============================
+@st.cache_data
+def cargar_datos():
+    df_2022 = pd.read_excel("data/Pobreza_2022_CORREGIDO.xlsx")
+    df_2023 = pd.read_excel("data/Pobreza_2023_CORREGIDO.xlsx")
+    df_2024 = pd.read_excel("data/Pobreza_2024_CORREGIDO.xlsx")
+    geo = gpd.read_file("data/peru_departamental.geojson")
+    df = pd.concat([df_2022, df_2023, df_2024], ignore_index=True)
+    return df, geo
 
-# === Layout con columnas ===
-col1, col2 = st.columns([2.5, 1.2])
+@st.cache_resource
+def cargar_modelos():
+    modelo = load_model("models/modelo_pobreza.h5")
+    scaler = joblib.load("models/scaler.pkl")
+    return modelo, scaler
 
-with col1:
-    st.markdown(f"### 🗺️ Mapa de Pobreza {año}")
-    st_data = st_folium(m, width=800, height=600)
+df, geo = cargar_datos()
+modelo, scaler = cargar_modelos()
 
-with col2:
-    st.markdown(f"### 📈 Indicadores Nacionales {año}")
-    promedio_total = datos_año["pobreza_total_%"].mean()
-    promedio_extrema = datos_año["pobreza_extrema_%"].mean()
-    promedio_informal = datos_año["empleo_informal_%"].mean()
-    promedio_internet = datos_año["sin_internet_%"].mean()
+# ============================
+# FUNCIONES AUXILIARES
+# ============================
+def pintar_mapa(df_anio: pd.DataFrame, titulo: str = ""):
+    m = folium.Map(location=[-9.19, -75.0152], zoom_start=5, tiles="cartodb dark_matter")
+    merged = geo.merge(df_anio, left_on="NOMBDEP", right_on="departamento", how="left")
+    folium.Choropleth(
+        geo_data=merged,
+        name="choropleth",
+        data=merged,
+        columns=["departamento", "pobreza_total_%"],
+        key_on="feature.properties.NOMBDEP",
+        fill_color="YlOrRd",
+        fill_opacity=0.85,
+        line_opacity=0.3,
+        nan_fill_color="#444444",
+        legend_name=f"Pobreza total (%) — {titulo}",
+    ).add_to(m)
+    return m
 
-    st.metric("💰 Pobreza Total Promedio", f"{promedio_total:.1f}%")
-    st.metric("⚠️ Pobreza Extrema Promedio", f"{promedio_extrema:.1f}%")
-    st.metric("👷 Empleo Informal Promedio", f"{promedio_informal:.1f}%")
-    st.metric("🌐 Sin Internet Promedio", f"{promedio_internet:.1f}%")
+# ============================
+# MODO HISTÓRICO
+# ============================
+if modo == "🕰️ Histórico":
+    st.title("📘 Mapa de Pobreza (2022–2024)")
+    años = sorted(df["año"].unique())
+    año_sel = st.sidebar.selectbox("Selecciona un año", años, index=max(0, len(años) - 1))
+    df_año = df[df["año"] == año_sel].copy()
+    m = pintar_mapa(df_año, titulo=str(año_sel))
+    st_folium(m, width=780, height=520)
+    st.dataframe(df_año.reset_index(drop=True))
 
-    st.markdown("---")
-    st.dataframe(
-        datos_año[["departamento", "pobreza_total_%", "pobreza_extrema_%", "empleo_informal_%", "sin_internet_%", "umbral_zona_pobreza"]]
-        .sort_values("pobreza_total_%", ascending=False)
-        .reset_index(drop=True),
-        use_container_width=True,
-        height=450
-    )
+# ============================
+# MODO PREDICCIÓN 2025
+# ============================
+else:
+    st.title("🤖 Predicción de Pobreza 2025")
+    x1 = st.sidebar.number_input("pobreza_total_%_2023", 0.0, 100.0, 28.10)
+    x2 = st.sidebar.number_input("empleo_informal_%", 0.0, 100.0, 37.90)
+    x3 = st.sidebar.number_input("subempleo_%", 0.0, 100.0, 22.50)
+    x4 = st.sidebar.number_input("uso_internet_no_%", 0.0, 100.0, 52.10)
+    x5 = st.sidebar.number_input("viviendas_piso_tierra_%", 0.0, 100.0, 30.50)
+    x6 = st.sidebar.number_input("anemia_infantil_%", 0.0, 100.0, 40.20)
+    x7 = st.sidebar.number_input("poblacion_sin_servicios_%", 0.0, 100.0, 18.70)
 
-st.success(f"✅ Dashboard interactivo actualizado para el año {año}")
+    X = np.array([[x1, x2, x3, x4, x5, x6, x7]], dtype=float)
+    Xs = scaler.transform(X)
+    y_pred = float(modelo.predict(Xs, verbose=0)[0][0])
+
+    st.metric("🔮 Pobreza total proyectada (2025)", f"{y_pred:.2f}%")
+
+    prom = df.groupby("año", as_index=False)["pobreza_total_%"].mean().sort_values("año")
+    prom_2025 = pd.DataFrame({"año": [2025], "pobreza_total_%": [y_pred]})
+    tendencia = pd.concat([prom, prom_2025], ignore_index=True)
+
+    fig, ax = plt.subplots(figsize=(7.5, 3.8))
+    ax.plot(tendencia["año"], tendencia["pobreza_total_%"], marker="o", linewidth=2)
+    ax.scatter(2025, y_pred, s=120)
+    ax.set_title("Evolución de la pobreza total promedio (2022–2025)")
+    ax.set_xlabel("Año")
+    ax.set_ylabel("Pobreza total (%)")
+    st.pyplot(fig)
